@@ -7,6 +7,12 @@ import onnxruntime as ort
 from utils import load_toml_as_dict
 import warnings
 
+try:
+    import openvino as ov
+    HAS_OPENVINO = True
+except ImportError:
+    HAS_OPENVINO = False
+
 warnings.filterwarnings(
     "ignore",
     message=".*'pin_memory' argument is set as true but no accelerator is found.*",
@@ -165,7 +171,9 @@ class Detect:
         self.ignore_classes = set(ignore_classes) if ignore_classes else set()
         self.input_size = input_size
         self.model, self.device = self.load_model()
-        self.input_name = self.model.get_inputs()[0].name
+        self.is_openvino = "OpenVINO" in str(self.device)
+        if not self.is_openvino:
+            self.input_name = self.model.get_inputs()[0].name
         self._padded_img_buffer = np.full(
             (1, 3, self.input_size[0], self.input_size[1]),
             128.0 / 255.0,
@@ -173,6 +181,24 @@ class Detect:
         )
 
     def load_model(self):
+        # 1. OpenVINO support with automatic INT8 detection
+        if HAS_OPENVINO:
+            int8_xml = self.model_path.replace(".onnx", "_int8.xml")
+            target_path = int8_xml if os.path.exists(int8_xml) else self.model_path
+            try:
+                core = ov.Core()
+                device = "CPU"
+                if ("gpu" in self.preferred_device.lower() or "auto" in self.preferred_device.lower()) and "GPU" in core.available_devices:
+                    device = "GPU"
+                ov_model = core.read_model(target_path)
+                compiled = core.compile_model(ov_model, device)
+                is_int8 = target_path.endswith("_int8.xml")
+                print(f"[OpenVINO] Loaded {os.path.basename(target_path)} on {device} (INT8={is_int8})")
+                return compiled, f"OpenVINO_{device}"
+            except Exception as e:
+                print(f"[OpenVINO] Error loading {target_path}, falling back to ONNX Runtime: {e}")
+
+        # 2. Fallback to ONNX Runtime
         available_providers = ort.get_available_providers()
         if self.preferred_device == "gpu" or self.preferred_device == "auto":
             if "CUDAExecutionProvider" in available_providers:
@@ -186,7 +212,6 @@ class Detect:
             else:
                 print("Using CPU as no GPU provider found")
                 onnx_provider = "CPUExecutionProvider"
-
         else:
             onnx_provider = "CPUExecutionProvider"
 
@@ -195,7 +220,6 @@ class Detect:
         so.intra_op_num_threads = self.optimal_threads_amount
         so.inter_op_num_threads = self.optimal_threads_amount
         model = ort.InferenceSession(self.model_path, sess_options=so, providers=[onnx_provider])
-
         return model, onnx_provider
 
     def preprocess_image(self, img):
@@ -250,10 +274,13 @@ class Detect:
 
         preprocessed_img, resized_w, resized_h = self.preprocess_image(img)
 
-        outputs = self.model.run(
-            None,
-            {self.input_name: preprocessed_img}
-        )
+        if self.is_openvino:
+            outputs = [self.model([preprocessed_img])[0]]
+        else:
+            outputs = self.model.run(
+                None,
+                {self.input_name: preprocessed_img}
+            )
 
         detections = self.postprocess(
             outputs,
