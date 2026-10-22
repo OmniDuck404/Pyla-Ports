@@ -183,7 +183,7 @@ class StageManager:
         if self._should_stop() or self._should_pause():
             return
         self.window_controller.release_movement()
-        self.window_controller.press("proceed")
+        self.window_controller.press("proceed", delay=0.1)
         print("Pressed to start a match")
         time.sleep(2)
 
@@ -289,7 +289,7 @@ class StageManager:
         print("Game has ended", current_state)
 
     def quit_shop(self):
-        self.window_controller.click(100*self.window_controller.width_ratio, 60*self.window_controller.height_ratio)
+        self.window_controller.click(100*self.window_controller.width_ratio, 60*self.window_controller.height_ratio, delay=0.1)
         time.sleep(1)
 
     def close_pop_up(self):

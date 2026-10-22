@@ -371,9 +371,12 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
 
                 self.manage_time_tasks(frame)
 
-                brawler = self.Stage_manager.brawlers_pick_data[0]['brawler']
-                self.Play.current_brawler = brawler
-                self.Play.main(frame, brawler, self)
+                if self.get_latest_state() == "match":
+                    brawler = self.Stage_manager.brawlers_pick_data[0]['brawler']
+                    self.Play.current_brawler = brawler
+                    self.Play.main(frame, brawler, self)
+                else:
+                    self.Play.window_controller.release_movement()
                 c += 1
 
                 if self.max_ips:
