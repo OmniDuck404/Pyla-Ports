@@ -240,8 +240,12 @@ class WindowController:
         self.device.app_stop(self.BRAWL_STARS_PACKAGE)
         time.sleep(1)
         self.device.app_start(self.BRAWL_STARS_PACKAGE)
-        time.sleep(3)
-        print("Brawl stars restarted successfully.")
+        for _ in range(20):
+            time.sleep(1)
+            if self.is_brawl_stars_running():
+                print("Brawl stars restarted successfully.")
+                return
+        print("Brawl stars restart timed out after 20s.")
 
     def is_brawl_stars_running(self):
         try:
