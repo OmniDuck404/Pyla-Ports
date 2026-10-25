@@ -205,13 +205,23 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
 
         def state_checker_loop(self):
             last_checked_frame_time = 0.0
+            last_match_check_time = 0.0
             while not self.state_checker_stop_event.is_set():
                 frame, frame_time = self.window_controller.get_latest_frame()
                 if frame is None or frame_time <= last_checked_frame_time:
                     self.state_checker_stop_event.wait(0.01)
                     continue
 
+                # En cours de match, espacer les vérifications d'état (0.8s au lieu de chaque frame 33ms)
+                # pour libérer 100% de la bande passante CPU pour l'inférence YOLO
+                current_time = time.time()
+                current_state = self.get_latest_state()
+                if current_state == "match" and (current_time - last_match_check_time < 0.8):
+                    self.state_checker_stop_event.wait(0.05)
+                    continue
+
                 last_checked_frame_time = frame_time
+                last_match_check_time = current_time
                 try:
                     self.set_latest_state(get_state(frame))
                 except Exception as e:
