@@ -1845,6 +1845,15 @@ async function fetchJSON(url, options = {}, allowFailure = false) {
     });
     const payload = await response.json().catch(() => ({}));
 
+    if (response.status === 403 && payload.code === "INVALID_UI_SESSION") {
+        if (!window._pylaReloading) {
+            window._pylaReloading = true;
+            console.warn("Session UI expirée. Rechargement automatique de la page...");
+            window.location.reload();
+        }
+        return payload;
+    }
+
     if (!response.ok && !allowFailure) {
         throw new Error(payload.message || `Request failed for ${url}`);
     }

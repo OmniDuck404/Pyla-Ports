@@ -18,18 +18,12 @@ from .services import WebDataService
 class _SuppressRuntimeStatusPolling(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        return not (
-            '"GET /api/queue ' in message
-            and ' 200 -' in message
-        )
+        return not ('/api/queue' in message)
 
 class _SuppressQueuePolling(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        return not (
-            '"GET /api/runtime/status ' in message
-            and ' 200 -' in message
-        )
+        return not ('/api/runtime/status' in message)
 
 class _SuppressAssetsGetting(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:

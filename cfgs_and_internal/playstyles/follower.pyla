@@ -1,26 +1,28 @@
 {"name": "Follower", "description": "Follow teammates when no enemies", "brawlers": ["all"], "gamemodes": ["all"], "author": "Official", "date": "2026-04-23"}
+def move_toward(target_pos):
+    # Contournement continu A* (calculé et lissé par le moteur logique)
+    routed = get_path_movement(player_pos, target_pos, walls)
+    if routed is not None and (abs(routed[0]) > 0.1 or abs(routed[1]) > 0.1):
+        return routed
+
+    # Fallback direct si le chemin est dégagé
+    dx = target_pos[0] - player_pos[0]
+    dy = target_pos[1] - player_pos[1]
+    magnitude = math.hypot(dx, dy)
+    if magnitude > 0:
+        scale = JOYSTICK_RADIUS / magnitude
+        direct = (dx * scale, dy * scale)
+        if not is_path_blocked(player_data, direct, walls):
+            return direct
+    return (0, 0)
+
 def no_enemy_movement():
-    player_pos = get_entity_pos(player_data)
     closest_teammate_coords, dist = find_closest_teammate(teammate_data, player_pos, walls)
     if not closest_teammate_coords:
         return 0, -JOYSTICK_RADIUS
-    if dist <= 60:
+    if dist <= 80:
         return 0, 0
-    direction_x = closest_teammate_coords[0] - player_pos[0]
-    direction_y = closest_teammate_coords[1] - player_pos[1]
-    movement_options = [(direction_x, direction_y), (direction_x, 0), (0, direction_y)]
-
-    for move in movement_options:
-        if not is_path_blocked(player_data, move, walls):
-            return move
-    else:
-        # If all preferred directions are blocked, try other directions
-        alternative_moves = [(0, -JOYSTICK_RADIUS), (-JOYSTICK_RADIUS, 0), (0, JOYSTICK_RADIUS), (JOYSTICK_RADIUS, 0)]
-        for move in alternative_moves:
-            if not is_path_blocked(player_data, move, walls):
-                return move
-        else:
-            return movement_options[0]
+    return move_toward(closest_teammate_coords)
 
 brawler_info = brawlers_info.get(brawler)
 if not brawler_info:
@@ -45,34 +47,14 @@ else:
         direction_x = enemy_coords[0] - player_pos[0]
         direction_y = enemy_coords[1] - player_pos[1]
 
-        # Determine initial movement direction
-        if enemy_distance > safe_range:  # Move towards the enemy
-            move_horizontal = (direction_x, 0)
-            move_vertical = (0, direction_y)
-            move_diagonal = (direction_x, direction_y)
-        else:  # Move away from the enemy
-            move_horizontal = (-direction_x, 0)
-            move_vertical = (0, -direction_y)
-            move_diagonal = (-direction_x, -direction_y)
-
-        movement_options = [move_diagonal, move_vertical, move_horizontal]
-
-        # Check for walls and adjust movement
-        for move in movement_options:
-            if not is_path_blocked(player_data, move, walls):
-                movement = move
-                break
+        # Déplacement continu : approche ou kiting via A* en contournant tous les obstacles
+        if enemy_distance > safe_range:
+            movement = move_toward(enemy_coords)
         else:
-            # If all preferred directions are blocked, try other directions
-            alternative_moves = [(0, -JOYSTICK_RADIUS), (-JOYSTICK_RADIUS, 0), (0, JOYSTICK_RADIUS), (JOYSTICK_RADIUS, 0)]
-            for move in alternative_moves:
-                if not is_path_blocked(player_data, move, walls):
-                    movement = move
-                    break
-            else:
-                # if no movement is available, we still try to go in the best direction
-                # because it's better than doing nothing
-                movement = move_diagonal
+            # Ennemi trop proche : recul sécurisé à l'opposé tout en évitant les murs
+            escape_x = player_pos[0] - direction_x
+            escape_y = player_pos[1] - direction_y
+            movement = move_toward((escape_x, escape_y))
 
         if is_super_ready and persistent_data["time_since_holding_attack"] is None:
             super_type = brawler_info['super_type']

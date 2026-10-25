@@ -46,6 +46,47 @@ class LobbyAutomation:
             time.sleep(min(poll_interval, max(end_time - time.time(), 0)))
         return False
 
+    def select_brawler_via_search(self, brawler, stop_event=None, runtime_control=None):
+        try:
+            buttons = load_toml_as_dict("cfg/buttons_config.toml")
+            search_coords = buttons.get("brawler_search", [815, 50])
+            card_coords = buttons.get("first_brawler_card", [280, 280])
+            select_coords = buttons.get("select_brawler", [150, 950])
+
+            print(f"[LobbyAutomation] Attempting direct search for brawler '{brawler}' via ADB...")
+            self.window_controller.click(search_coords[0], search_coords[1], already_include_ratio=False)
+            if self._sleep_interruptible(0.6, runtime_control, stop_event):
+                return "aborted"
+
+            cmd = f"input text {brawler}"
+            if hasattr(self.window_controller, "device") and hasattr(self.window_controller.device, "shell"):
+                self.window_controller.device.shell(cmd)
+            else:
+                import subprocess
+                serial = getattr(getattr(self.window_controller, "device", None), "serial", None)
+                adb_cmd = ["adb", "-s", str(serial), "shell", cmd] if serial else ["adb", "shell", cmd]
+                subprocess.run(adb_cmd, timeout=3)
+
+            if self._sleep_interruptible(0.6, runtime_control, stop_event):
+                return "aborted"
+
+            self.window_controller.click(card_coords[0], card_coords[1], already_include_ratio=False)
+            print(f"[LobbyAutomation] Clicked filtered brawler card at {card_coords}")
+
+            if self._sleep_interruptible(0.8, runtime_control, stop_event):
+                return "aborted"
+
+            self.window_controller.click(select_coords[0], select_coords[1], already_include_ratio=False)
+            if self._sleep_interruptible(1.0, runtime_control, stop_event):
+                return "aborted"
+
+            self.window_controller.screenshot()
+            print(f"[LobbyAutomation] Successfully selected brawler '{brawler}' via direct search!")
+            return "success"
+        except Exception as e:
+            print(f"[LobbyAutomation] Direct search attempt encountered: {e}, falling back...")
+            return "fallback"
+
     def select_brawler(self, brawler, get_latest_state, stop_event=None, runtime_control=None):
         self.window_controller.screenshot()
         wr = self.window_controller.width_ratio
@@ -56,9 +97,15 @@ class LobbyAutomation:
 
         x, y = load_toml_as_dict("cfg/buttons_config.toml")["brawlers_menu"]
         self.window_controller.click(x, y, already_include_ratio=False)
-        time.sleep(0.5)
+        time.sleep(0.8)
+
+        # Priorité 1 : Recherche directe ADB sans EasyOCR
+        search_res = self.select_brawler_via_search(brawler, stop_event, runtime_control)
+        if search_res in ["success", "aborted"]:
+            return search_res
+
         c = 0
-        print("Automatic brawler selection started for", brawler)
+        print("Automatic brawler selection fallback started for", brawler)
         shop_counter = 0
         for i in range(100):
             if self._should_interrupt(runtime_control, stop_event):

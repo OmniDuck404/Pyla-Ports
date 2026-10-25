@@ -61,7 +61,7 @@ def apply_play_order(queue_data):
 def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
     class Main:
         def __init__(self):
-            current_playstyle = load_toml_as_dict("cfg/bot_config.toml").get("current_playstyle", "default_up.pyla")
+            current_playstyle = load_toml_as_dict("cfg/bot_config.toml").get("current_playstyle", "follower.pyla")
             try:
                 self.max_ips = int(load_toml_as_dict("cfg/general_config.toml")['max_ips'])
             except ValueError:
@@ -197,6 +197,8 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
 
             print(f"State: {state}")
             frame_data = None
+            if state == "match" and getattr(self.Play, "static_map_enabled", False) and getattr(self.Play, "static_map_manager", None):
+                self.Play.static_map_manager.reset_match_position(is_red_side=False)
             self.Stage_manager.do_state(state, frame_data)
             if state != "match":
                 self.Play.time_since_last_proceeding = time.time()
@@ -270,10 +272,10 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
                 try:
                     opened_app = self.window_controller.device.app_current().package.strip()
                     if not self.window_controller.is_brawl_stars_running():
-                        print(f"Brawl stars has crashed, {opened_app} is the app opened ! Restarting...")
-                        self.window_controller.device.app_start(self.window_controller.BRAWL_STARS_PACKAGE)
-                        time.sleep(3)
-                        self.time_since_checked_if_brawl_stars_crashed = time.time()
+                        print(f"[PylaAI] BSD Brawl n'est pas actif (app: {opened_app}). Mise en pause sécurisée, le Watchdog gère la relance...")
+                        self.Play.window_controller.release_movement()
+                        self.set_latest_state(None)
+                        self.time_since_checked_if_brawl_stars_crashed = c_time
                     else:
                         self.time_since_checked_if_brawl_stars_crashed = c_time
                 except AdbError:
@@ -370,6 +372,10 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
                     continue
 
                 self.manage_time_tasks(frame)
+
+                if self.should_stop():
+                    self.stop_gracefully()
+                    break
 
                 if self.get_latest_state() == "match":
                     brawler = self.Stage_manager.brawlers_pick_data[0]['brawler']

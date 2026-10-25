@@ -9,7 +9,9 @@ from adbutils import adb, AdbDevice
 from debug_view import DebugViewPublisher
 from utils import config_bool, load_toml_as_dict, save_dict_as_toml, invalidate_toml_cache
 
-brawl_stars_width, brawl_stars_height = 1920, 1080
+NATIVE_BS_WIDTH, NATIVE_BS_HEIGHT = 1024, 768
+CANONICAL_REF_WIDTH, CANONICAL_REF_HEIGHT = 1920, 1080
+brawl_stars_width, brawl_stars_height = NATIVE_BS_WIDTH, NATIVE_BS_HEIGHT
 
 press_coords_dict = load_toml_as_dict("cfg/buttons_config.toml")
 KNOWN_BS_PACKAGES = ("com.supercell.brawlstars", "bsd.suitcase.release")
@@ -289,20 +291,24 @@ class WindowController:
         if not self.width or not self.height:
             self.width = frame.shape[1]
             self.height = frame.shape[0]
-            if (self.width, self.height) != (brawl_stars_width, brawl_stars_height):
-                print(f"WARNING: Unexpected resolution: {self.width}x{self.height}. Expected {brawl_stars_width}x{brawl_stars_height}. Please set your emulator resolution to 1920x1080 for best results.")
-            self.width_ratio = self.width / brawl_stars_width
-            self.height_ratio = self.height / brawl_stars_height
+            if (self.width, self.height) == (NATIVE_BS_WIDTH, NATIVE_BS_HEIGHT):
+                print(f"[WindowController] Résolution native 1024x768 détectée (profil Waydroid stable).")
+            elif (self.width, self.height) == (CANONICAL_REF_WIDTH, CANONICAL_REF_HEIGHT):
+                print(f"[WindowController] Résolution 1920x1080 détectée.")
+            else:
+                print(f"[WindowController] Résolution détectée : {self.width}x{self.height}. Adaptation dynamique active.")
+            self.width_ratio = self.width / CANONICAL_REF_WIDTH
+            self.height_ratio = self.height / CANONICAL_REF_HEIGHT
             self.joystick_x, self.joystick_y = 220 * self.width_ratio, 870 * self.height_ratio
             self.scale_factor = min(self.width_ratio, self.height_ratio)
         return frame
 
     def reset_to_default_resolution(self):
-        print("Resetting window controller dimensions to 1920x1080 and updating scale ratios...")
-        self.width = brawl_stars_width
-        self.height = brawl_stars_height
-        self.width_ratio = self.width / brawl_stars_width
-        self.height_ratio = self.height / brawl_stars_height
+        print(f"Resetting window controller dimensions to {NATIVE_BS_WIDTH}x{NATIVE_BS_HEIGHT} and updating scale ratios...")
+        self.width = NATIVE_BS_WIDTH
+        self.height = NATIVE_BS_HEIGHT
+        self.width_ratio = self.width / CANONICAL_REF_WIDTH
+        self.height_ratio = self.height / CANONICAL_REF_HEIGHT
         self.joystick_x, self.joystick_y = 220 * self.width_ratio, 870 * self.height_ratio
         self.scale_factor = min(self.width_ratio, self.height_ratio)
 
@@ -376,6 +382,31 @@ class WindowController:
         target_x = x * self.width_ratio
         target_y = y * self.height_ratio
         self.click(target_x, target_y, delay, touch_up=touch_up, touch_down=touch_down)
+
+    def aim_and_attack(self, target_x, target_y, player_x=None, player_y=None, is_super=False, radius=120):
+        btn_key = "super" if is_super else "attack"
+        if btn_key not in press_coords_dict:
+            btn_key = "attack"
+        base_x, base_y = press_coords_dict[btn_key]
+        center_x = base_x * self.width_ratio
+        center_y = base_y * self.height_ratio
+
+        if player_x is None or player_y is None:
+            player_x = (self.width or brawl_stars_width) / 2
+            player_y = (self.height or brawl_stars_height) / 2
+
+        dx = target_x - player_x
+        dy = target_y - player_y
+        angle = math.atan2(dy, dx)
+
+        r = radius * (self.scale_factor or 1.0)
+        drag_x = center_x + r * math.cos(angle)
+        drag_y = center_y + r * math.sin(angle)
+
+        self.touch_down(int(center_x), int(center_y), pointer_id=self.PID_ATTACK)
+        self.touch_move(int(drag_x), int(drag_y), pointer_id=self.PID_ATTACK)
+        time.sleep(0.005)
+        self.touch_up(int(drag_x), int(drag_y), pointer_id=self.PID_ATTACK)
 
     def swipe(self, start_x, start_y, end_x, end_y, duration=0.2):
         dist_x = end_x - start_x

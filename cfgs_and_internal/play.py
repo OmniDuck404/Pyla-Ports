@@ -17,9 +17,10 @@ except ImportError:
 from state_finder import get_state
 from utils import load_toml_as_dict, count_hsv_pixels, load_brawlers_info, interpret_pyla_code, \
     count_mask_pixels, JOYSTICK_RADIUS, clamp, config_bool, is_safe_ast
+from static_map_manager import StaticMapManager
 
 
-brawl_stars_width, brawl_stars_height = 1920, 1080
+brawl_stars_width, brawl_stars_height = 1024, 768
 super_crop_area = load_toml_as_dict("./cfg/lobby_config.toml")['pixel_counter_crop_area']['super']
 gadget_crop_area = load_toml_as_dict("./cfg/lobby_config.toml")['pixel_counter_crop_area']['gadget']
 hypercharge_crop_area = load_toml_as_dict("./cfg/lobby_config.toml")['pixel_counter_crop_area']['hypercharge']
@@ -53,10 +54,16 @@ class Play:
         self.time_since_different_movement = time.time()
         self.time_since_gadget_checked = time.time()
         self.is_gadget_ready = False
+        self.last_naive_gadget_time = time.time()
+        self.next_naive_gadget_interval = random.uniform(15.0, 25.0)
+
         self.time_since_hypercharge_checked = time.time()
         self.is_hypercharge_ready = False
+
         self.time_since_super_checked = time.time()
         self.is_super_ready = False
+        self.last_naive_super_time = time.time()
+        self.next_naive_super_interval = random.uniform(15.0, 25.0)
         self.window_controller = window_controller
         self.TILE_SIZE = bot_config.get("perceived_tile_size", 54)
         self.centered_wall_detection = config_bool(bot_config.get("centered_wall_detection"), False)
@@ -80,6 +87,9 @@ class Play:
         ) if self.centered_wall_detection else None
 
         self.time_since_walls_checked = 0
+        self.wall_decay_timeout = 0.65  # Persistance de 0.65s (~3 cycles YOLO de 0.2s) : comble les manques sans laisser de murs fantômes en mouvement
+        self.wall_spatial_cache = {}   # (grid_x, grid_y) -> {"box": [x1, y1, x2, y2], "timestamp": float}
+        self.bush_spatial_cache = {}   # (grid_x, grid_y) -> {"box": [x1, y1, x2, y2], "timestamp": float}
         self.time_since_player_last_found = time.time()
         self.current_brawler = None
         self.brawlers_info = load_brawlers_info()
@@ -92,6 +102,7 @@ class Play:
         self.locked_enemy_targets = {}  # skill_type -> {"pos": (x, y), "last_seen": float}
         self._path_cache = None  # {"start_cell", "goal_cell", "waypoints", "computed_at"}
         self._last_path_waypoints = []
+        self.last_movement_vector = None
 
         self.last_movement = ''
         self.last_movement_change_time = time.time()
@@ -103,6 +114,12 @@ class Play:
         self.wall_detection_confidence = bot_config["wall_detection_confidence"]
         self.entity_detection_confidence = bot_config["entity_detection_confidence"]
         self.seconds_to_hold_attack_after_reaching_max = load_toml_as_dict("cfg/bot_config.toml")["seconds_to_hold_attack_after_reaching_max"]
+        self.vector_aim = config_bool(bot_config.get("vector_aim"), False)
+        self.static_map_enabled = config_bool(bot_config.get("static_map_enabled"), False)
+        self.static_map_name = str(bot_config.get("static_map_name", "bb_today"))
+        scale_fac = self.window_controller.scale_factor if self.window_controller else 1.0
+        self.static_map_manager = StaticMapManager(self.static_map_name, scale_factor=scale_fac) if self.static_map_enabled else None
+        self.last_static_pos_update_time = time.time()
         self.persistent_data = {"time_since_holding_attack": None}
         if isinstance(pyla_code, str):
             is_safe, error_msg = is_safe_ast(pyla_code)
@@ -130,8 +147,36 @@ class Play:
             return False
         return True
 
-    def attack(self, touch_up=True, touch_down=True):
-        self.window_controller.press("attack", touch_up=touch_up, touch_down=touch_down)
+    def get_lead_target(self, target_pos, skill_type="attack"):
+        lock = self.locked_enemy_targets.get(skill_type)
+        if not lock or "prev_pos" not in lock:
+            return target_pos
+        dt = lock["last_seen"] - lock.get("prev_time", lock["last_seen"])
+        if 0.01 < dt < 0.6:
+            vx = (target_pos[0] - lock["prev_pos"][0]) / dt
+            vy = (target_pos[1] - lock["prev_pos"][1]) / dt
+            lead_time = 0.15
+            lead_x = target_pos[0] + vx * lead_time
+            lead_y = target_pos[1] + vy * lead_time
+            return (lead_x, lead_y)
+        return target_pos
+
+    def attack(self, touch_up=True, touch_down=True, target_coords=None):
+        if not touch_up or not touch_down or not getattr(self, "vector_aim", False):
+            self.window_controller.press("attack", touch_up=touch_up, touch_down=touch_down)
+            return
+
+        if target_coords is None:
+            lock = self.locked_enemy_targets.get("attack")
+            if lock and time.time() - lock.get("last_seen", 0) <= self.TARGET_LOCK_TIMEOUT:
+                target_coords = lock["pos"]
+
+        if target_coords is not None and self.context and "player_data" in self.context:
+            player_pos = self.get_entity_pos(self.context["player_data"])
+            lead_coords = self.get_lead_target(target_coords, "attack")
+            self.window_controller.aim_and_attack(lead_coords[0], lead_coords[1], player_pos[0], player_pos[1], is_super=False)
+        else:
+            self.window_controller.press("attack", touch_up=touch_up, touch_down=touch_down)
 
     def use_hypercharge(self):
         print("Using hypercharge")
@@ -140,16 +185,41 @@ class Play:
         self.is_hypercharge_ready = False
 
     def use_gadget(self):
+        c_time = time.time()
+        if c_time - getattr(self, "last_gadget_press_time", 0.0) < 2.0:
+            return
+        self.last_gadget_press_time = c_time
         print("Using gadget")
         self.window_controller.press("gadget")
-        self.time_since_gadget_checked = time.time()
+        self.time_since_gadget_checked = c_time
         self.is_gadget_ready = False
+        self.last_naive_gadget_time = c_time
+        self.next_naive_gadget_interval = random.uniform(15.0, 25.0)
 
-    def use_super(self):
+    def use_super(self, target_coords=None):
+        c_time = time.time()
+        if c_time - getattr(self, "last_super_press_time", 0.0) < 2.0:
+            return
+        self.last_super_press_time = c_time
         print("Using super")
-        self.window_controller.press("super")
-        self.time_since_super_checked = time.time()
+        if getattr(self, "vector_aim", False):
+            if target_coords is None:
+                lock = self.locked_enemy_targets.get("super") or self.locked_enemy_targets.get("attack")
+                if lock and time.time() - lock.get("last_seen", 0) <= self.TARGET_LOCK_TIMEOUT:
+                    target_coords = lock["pos"]
+
+            if target_coords is not None and self.context and "player_data" in self.context:
+                player_pos = self.get_entity_pos(self.context["player_data"])
+                lead_coords = self.get_lead_target(target_coords, "super")
+                self.window_controller.aim_and_attack(lead_coords[0], lead_coords[1], player_pos[0], player_pos[1], is_super=True)
+            else:
+                self.window_controller.press("super")
+        else:
+            self.window_controller.press("super")
+        self.time_since_super_checked = c_time
         self.is_super_ready = False
+        self.last_naive_super_time = c_time
+        self.next_naive_super_interval = random.uniform(15.0, 25.0)
 
     @staticmethod
     def get_random_movement():
@@ -410,7 +480,15 @@ class Play:
             chosen = locked_candidate
 
         if chosen is not None:
-            self.locked_enemy_targets[skill_type] = {"pos": chosen[0], "last_seen": now}
+            prev_lock = self.locked_enemy_targets.get(skill_type)
+            prev_pos = prev_lock["pos"] if prev_lock else chosen[0]
+            prev_time = prev_lock["last_seen"] if prev_lock else now
+            self.locked_enemy_targets[skill_type] = {
+                "pos": chosen[0],
+                "last_seen": now,
+                "prev_pos": prev_pos,
+                "prev_time": prev_time
+            }
         else:
             self.locked_enemy_targets.pop(skill_type, None)
             return None, None
@@ -436,7 +514,7 @@ class Play:
     PATH_MARGIN_CELLS = 4          # extra grid margin around start/goal, in cells
     PATH_RECOMPUTE_INTERVAL = 0.25  # seconds between replans, mirrors the wall refresh cadence
     PATH_GOAL_MOVE_THRESHOLD_CELLS = 1.0
-    PATH_WAYPOINT_REACHED_RADIUS_TILES = 0.6
+    PATH_WAYPOINT_REACHED_RADIUS_TILES = 1.0
 
     def _path_cell_size(self):
         return max(1.0, self.TILE_SIZE * (self.window_controller.scale_factor or 1) / 2.0)
@@ -484,7 +562,8 @@ class Play:
             return None
 
         cell_size = self._path_cell_size()
-        radius = PLAYER_HIT_CIRCLE_RADIUS * (self.window_controller.scale_factor or 1)
+        # Hitbox réelle du brawler pour le pathfinding (~0.65 de la taille de demi-tuile, évite de boucher les couloirs)
+        radius = max(8.0, cell_size * 0.65)
         inflated_walls = self._inflate_walls(walls, radius)
 
         margin = cell_size * self.PATH_MARGIN_CELLS
@@ -732,9 +811,26 @@ class Play:
 
     def do_movement(self, movement):
         movement_vector = self.movement_to_vector(movement)
-        if movement_vector is None:
+        if movement_vector is None or (abs(movement_vector[0]) < 1.0 and abs(movement_vector[1]) < 1.0):
+            self.last_movement_vector = None
             self.window_controller.release_movement()
             return
+
+        # Filtre passe-bas (Moyenne Mobile Exponentielle) pour supprimer les micro-secousses et à-coups parasites
+        if self.last_movement_vector is not None:
+            alpha = 0.70  # Convergence fluide (~60ms) : absorbe les hésitations 1-frame sans ajouter de latence
+            smoothed_x = alpha * movement_vector[0] + (1.0 - alpha) * self.last_movement_vector[0]
+            smoothed_y = alpha * movement_vector[1] + (1.0 - alpha) * self.last_movement_vector[1]
+
+            target_mag = math.hypot(movement_vector[0], movement_vector[1])
+            curr_mag = math.hypot(smoothed_x, smoothed_y)
+            if curr_mag > 0.1:
+                scale = target_mag / curr_mag
+                movement_vector = (smoothed_x * scale, smoothed_y * scale)
+            else:
+                movement_vector = (smoothed_x, smoothed_y)
+
+        self.last_movement_vector = movement_vector
         self.window_controller.move(*movement_vector)
 
     def get_brawler_range(self, brawler):
@@ -776,8 +872,8 @@ class Play:
                 'last_movement': self.last_movement,
                 'last_movement_change_time': self.last_movement_change_time,
                 'seconds_to_hold_attack_after_reaching_max': self.seconds_to_hold_attack_after_reaching_max,
-                "width": brawl_stars_width,
-                "height": brawl_stars_height,
+                "width": (self.window_controller.width if self.window_controller else None) or brawl_stars_width,
+                "height": (self.window_controller.height if self.window_controller else None) or brawl_stars_height,
                 'find_closest_enemy': self.find_closest_enemy,
                 'find_closest_teammate': self.find_closest_teammate,
                 'find_path': self.find_path,
@@ -902,14 +998,61 @@ class Play:
         tile_data = self.Detect_tile_detector.detect_objects(frame, conf_tresh=self.wall_detection_confidence)
         return tile_data
 
-    def process_tile_data(self, tile_data):
-        walls = []
-        bushes = []
+    def process_tile_data(self, tile_data, current_time=None):
+        if current_time is None:
+            current_time = time.time()
+
+        cell_px = 36.0  # taille de quantization pour grouper les tuiles détectées
+
+        # 1. Mise à jour de la mémoire spatiale avec les nouvelles détections
         for class_name, boxes in tile_data.items():
-            if 'bush' not in class_name:
-                walls.extend(boxes)
+            is_bush = 'bush' in class_name
+            target_cache = self.bush_spatial_cache if is_bush else self.wall_spatial_cache
+
+            for box in boxes:
+                if len(box) < 4:
+                    continue
+                x1, y1, x2, y2 = box[:4]
+
+                if not is_bush:
+                    # Correction d'ancrage au sol (Perspective 2.5D) selon la règle brawlstars_logic_engine :
+                    # On ne conserve que les 40% inférieurs pour les collisions et lignes de vue réelles au sol
+                    y_ground = y2 - (y2 - y1) * 0.40
+                    effective_box = [x1, y_ground, x2, y2]
+                else:
+                    effective_box = [x1, y1, x2, y2]
+
+                # Clé spatiale quantifiée au sol
+                cx = (x1 + x2) / 2.0
+                cy = (effective_box[1] + y2) / 2.0
+                key = (round(cx / cell_px), round(cy / cell_px))
+
+                target_cache[key] = {
+                    "box": effective_box,
+                    "timestamp": current_time
+                }
+
+        # 2. Élimination des tuiles expirées (Decay anticoupure : 1.6 secondes)
+        walls = []
+        expired_walls = []
+        for key, item in self.wall_spatial_cache.items():
+            if current_time - item["timestamp"] <= self.wall_decay_timeout:
+                walls.append(item["box"])
             else:
-                bushes.extend(boxes)
+                expired_walls.append(key)
+        for key in expired_walls:
+            del self.wall_spatial_cache[key]
+
+        bushes = []
+        expired_bushes = []
+        for key, item in self.bush_spatial_cache.items():
+            if current_time - item["timestamp"] <= self.wall_decay_timeout:
+                bushes.append(item["box"])
+            else:
+                expired_bushes.append(key)
+        for key in expired_bushes:
+            del self.bush_spatial_cache[key]
+
         return walls, bushes
 
     def get_movement(self):
@@ -968,9 +1111,21 @@ class Play:
         current_time = time.time()
         state = main.get_latest_state()
         data = self.get_main_data(frame)
-        if current_time - self.time_since_walls_checked > self.walls_treshold:
+        if self.static_map_enabled and self.static_map_manager and self.static_map_manager.enabled:
+            # Génération directe instantanée depuis la matrice discrète
+            player_list = data.get("player") if data else None
+            player_pos = self.get_entity_pos(player_list[0]) if player_list else (brawl_stars_width / 2.0, brawl_stars_height / 2.0)
+            walls, bushes = self.static_map_manager.get_visible_obstacles(player_pos, brawl_stars_width, brawl_stars_height)
+            if not hasattr(self, "_logged_static_map") or current_time - self._logged_static_map > 10.0:
+                print(f"[PylaAI] Mode Blueprint Carte Statique ACTIF : {len(walls)} murs, {len(bushes)} buissons visibles générés (0ms ONNX)")
+                self._logged_static_map = current_time
+            self.last_walls_data = walls
+            data['wall'] = walls
+            self.last_bushes_data = bushes
+            data['bush'] = bushes
+        elif current_time - self.time_since_walls_checked > self.walls_treshold:
             tile_data = self.get_tile_data(frame, data.get("player"))
-            walls, bushes = self.process_tile_data(tile_data)
+            walls, bushes = self.process_tile_data(tile_data, current_time)
             self.time_since_walls_checked = current_time
             self.last_walls_data = walls
             data['wall'] = walls
@@ -997,9 +1152,23 @@ class Play:
                     state = current_state
                     self.time_since_last_proceeding = current_time
                 else:
-                    print("haven't detected the player in a while proceeding")
-                    self.window_controller.press("proceed")
-                    self.time_since_last_proceeding = time.time()
+                    # Sécurité : Si le joueur est introuvable depuis plus de 12 secondes,
+                    # vérifier si le jeu est toujours au premier plan avant d'envoyer un clic.
+                    is_active = True
+                    if current_time - self.time_since_player_last_found > 12.0:
+                        try:
+                            is_active = self.window_controller.is_brawl_stars_running()
+                        except Exception:
+                            is_active = False
+
+                    if not is_active:
+                        print("[PylaAI] BSD Brawl n'est plus au premier plan. Mise en pause sécurisée (attente du Watchdog).")
+                        self.window_controller.release_movement()
+                        self.time_since_last_proceeding = current_time
+                    else:
+                        print("haven't detected the player in a while proceeding")
+                        self.window_controller.press("proceed")
+                        self.time_since_last_proceeding = time.time()
             self.publish_debug_view(frame, data, state)
             return
         self.time_since_last_proceeding = time.time()
@@ -1012,8 +1181,20 @@ class Play:
         if current_time - self.time_since_super_checked > self.super_treshold:
             self.is_super_ready = self.check_if_super_ready(frame)
             self.time_since_super_checked = current_time
+
+        # Déclenchement naïf périodique (intervalle aléatoire 15-25s) en cours de partie
+        if current_time - self.last_naive_gadget_time > self.next_naive_gadget_interval:
+            self.use_gadget()
+
+        if current_time - self.last_naive_super_time > self.next_naive_super_interval:
+            self.use_super()
+
         self.frame = frame
         movement = self.loop(brawler, data, current_time)
         self.publish_debug_view(frame, data, state, movement)
         if movement is not None:
             self.do_movement(movement)
+            if self.static_map_enabled and self.static_map_manager:
+                dt = max(0.001, min(0.5, current_time - self.last_static_pos_update_time))
+                self.static_map_manager.update_player_movement(movement, dt)
+        self.last_static_pos_update_time = current_time

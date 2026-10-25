@@ -136,11 +136,12 @@ movement = None
 trait_file_found = run_brawler_trait(_brawler_name)
 
 if not trait_file_found:
-    raise ValueError(
-        f"The 'Individual Brawlers' playstyle doesn't have tuned behavior for "
-        f"'{_brawler_name}' yet (missing cfg/brawler_traits/{_brawler_name}.py). "
-        f"Pick a different playstyle for this brawler, or add that file."
-    )
+    BRAWLER_TRAIT = {
+        "aggression": 0.5,
+        "kite_intensity": 0.5,
+        "retreat_ratio": 0.35,
+        "stick_to_teammates": 0.4,
+    }
 
 custom_movement_handled = movement is not None
 
@@ -209,9 +210,11 @@ def try_use_super(enemy_coords, enemy_distance):
     )
 
     if should_super:
-        if is_hypercharge_ready:
-            use_hypercharge()
-        use_super()
+        if time.time() - persistent_data.get("last_super_use", 0.0) > 2.5:
+            if is_hypercharge_ready:
+                use_hypercharge()
+            use_super()
+            persistent_data["last_super_use"] = time.time()
 
 def try_attack(enemy_coords, enemy_distance, allow_wall_attack=False):
     if enemy_distance > attack_range:
