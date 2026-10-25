@@ -789,6 +789,8 @@ class Play:
 
     @staticmethod
     def validate_game_data(data):
+        if not data or not isinstance(data, dict):
+            return False
         incomplete = False
         if "player" not in data.keys():
             incomplete = True  # This is required so track_no_detections can also keep track if enemy is missing
@@ -1206,8 +1208,8 @@ class Play:
 
     def get_latest_async_data(self, current_time):
         with self.async_lock:
-            if self.latest_async_data is None:
-                return self.validate_game_data({})
+            if not self.latest_async_data or not isinstance(self.latest_async_data, dict):
+                return False
 
             dt = current_time - self.latest_async_time
             data = {
