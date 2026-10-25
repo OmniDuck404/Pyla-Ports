@@ -136,7 +136,8 @@ class WindowController:
 
             self.frame_lock = threading.Lock()
             self.max_ips = max_ips
-            self.scrcpy_client = scrcpy.Client(device=self.device, max_width=0, bitrate=4000000) if self.max_ips == "auto" else scrcpy.Client(device=self.device, max_width=0, bitrate=4000000, max_fps=self.max_ips)
+            scrcpy_fps = 30 if (self.max_ips == "auto" or not self.max_ips) else min(30, int(self.max_ips))
+            self.scrcpy_client = scrcpy.Client(device=self.device, max_width=0, bitrate=4000000, max_fps=scrcpy_fps)
             self.last_frame = None
             self.last_frame_time = 0.0
             self.last_joystick_pos = (None, None)
@@ -216,7 +217,8 @@ class WindowController:
                         self.last_frame_time = time.time()
 
             try:
-                self.scrcpy_client = scrcpy.Client(device=self.device, max_width=0, bitrate=4000000) if self.max_ips == "auto" else scrcpy.Client(device=self.device, max_width=0, bitrate=4000000, max_fps=self.max_ips)
+                scrcpy_fps = 30 if (self.max_ips == "auto" or not self.max_ips) else min(30, int(self.max_ips))
+                self.scrcpy_client = scrcpy.Client(device=self.device, max_width=0, bitrate=4000000, max_fps=scrcpy_fps)
                 self.scrcpy_client.add_listener(scrcpy.EVENT_FRAME, on_frame)
                 self.scrcpy_client.start(threaded=True)
             except Exception as e:
