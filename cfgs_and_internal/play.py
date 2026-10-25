@@ -5,6 +5,7 @@ import time
 import cv2
 import numpy as np
 import os
+import threading
 
 from detect import Detect
 try:
@@ -132,6 +133,13 @@ class Play:
             self.pyla_code = pyla_code
         self.context = None
         self.frame = None
+        self.async_worker_running = False
+        self.async_worker_thread = None
+        self.async_lock = threading.Lock()
+        self.latest_async_data = None
+        self.latest_async_time = 0.0
+        self.prev_async_enemy_positions = {}
+        self.async_enemy_velocities = {}
 
     @staticmethod
     def get_entity_pos(entity):
@@ -1107,34 +1115,133 @@ class Play:
 
         self.window_controller.debug_view.publish(frame, debug_data)
 
+    def start_async_worker(self):
+        if self.async_worker_running:
+            return
+        self.async_worker_running = True
+        self.async_worker_thread = threading.Thread(
+            target=self._async_inference_loop,
+            daemon=True,
+            name="pyla-async-ia-worker"
+        )
+        self.async_worker_thread.start()
+
+    def stop_async_worker(self):
+        self.async_worker_running = False
+
+    def close(self):
+        self.stop_async_worker()
+
+    def _async_inference_loop(self):
+        # Assignation stricte de l'affinité CPU aux P-Cores 0 et 1 (demandé par l'utilisateur)
+        try:
+            os.sched_setaffinity(0, {0, 1})
+            print(f"[PylaAI] Worker IA Asynchrone verrouillé sur les cœurs {os.sched_getaffinity(0)}.")
+        except Exception as e:
+            print(f"[PylaAI] Note: Impossible d'assigner l'affinité CPU 0,1: {e}")
+
+        last_processed_frame_time = 0.0
+        while self.async_worker_running:
+            frame, ft = self.window_controller.get_latest_frame()
+            if frame is None or ft <= last_processed_frame_time:
+                time.sleep(0.005)
+                continue
+
+            last_processed_frame_time = ft
+            current_time = time.time()
+
+            try:
+                # 1. Inférence principale des brawlers (sur P-cores 0 & 1)
+                data = self.get_main_data(frame)
+
+                # 2. Gestion des obstacles (statique ou YOLO selon configuration)
+                if self.static_map_enabled and self.static_map_manager and self.static_map_manager.enabled:
+                    player_list = data.get("player") if data else None
+                    player_pos = self.get_entity_pos(player_list[0]) if player_list else (brawl_stars_width / 2.0, brawl_stars_height / 2.0)
+                    walls, bushes = self.static_map_manager.get_visible_obstacles(player_pos, brawl_stars_width, brawl_stars_height)
+                    data['wall'] = walls
+                    data['bush'] = bushes
+                elif current_time - self.time_since_walls_checked > self.walls_treshold:
+                    tile_data = self.get_tile_data(frame, data.get("player"))
+                    walls, bushes = self.process_tile_data(tile_data, current_time)
+                    self.time_since_walls_checked = current_time
+                    self.last_walls_data = walls
+                    self.last_bushes_data = bushes
+                    data['wall'] = walls
+                    data['bush'] = bushes
+                else:
+                    data['wall'] = self.last_walls_data
+                    data['bush'] = self.last_bushes_data
+
+                data = self.validate_game_data(data)
+
+                # 3. Calcul léger de vélocité pour l'extrapolation (vitesse des ennemis)
+                dt = current_time - self.latest_async_time
+                new_velocities = {}
+                if dt > 0.02 and data and "enemy" in data:
+                    new_positions = {}
+                    for i, box in enumerate(data["enemy"]):
+                        pos = self.get_entity_pos(box)
+                        new_positions[i] = pos
+                        if i in self.prev_async_enemy_positions:
+                            prev_pos = self.prev_async_enemy_positions[i]
+                            vx = (pos[0] - prev_pos[0]) / dt
+                            vy = (pos[1] - prev_pos[1]) / dt
+                            mag = math.hypot(vx, vy)
+                            if mag > 200.0:
+                                scale = 200.0 / mag
+                                vx, vy = vx * scale, vy * scale
+                            new_velocities[i] = (vx, vy)
+                    self.prev_async_enemy_positions = new_positions
+                self.async_enemy_velocities = new_velocities
+
+                # 4. Publication thread-safe instantanée
+                with self.async_lock:
+                    self.latest_async_data = data
+                    self.latest_async_time = current_time
+
+            except Exception as e:
+                print(f"[AsyncInference] Erreur inférence: {e}")
+                time.sleep(0.02)
+
+    def get_latest_async_data(self, current_time):
+        with self.async_lock:
+            if self.latest_async_data is None:
+                return self.validate_game_data({})
+
+            dt = current_time - self.latest_async_time
+            data = {
+                'player': list(self.latest_async_data.get('player', [])),
+                'enemy': list(self.latest_async_data.get('enemy', [])),
+                'teammate': list(self.latest_async_data.get('teammate', [])),
+                'wall': self.latest_async_data.get('wall', []),
+                'bush': self.latest_async_data.get('bush', [])
+            }
+
+            # Extrapolation fluide de la position des ennemis entre deux inférences (si dt < 200ms)
+            if 0.01 < dt < 0.20 and self.async_enemy_velocities:
+                extrapolated_enemies = []
+                for i, box in enumerate(data['enemy']):
+                    vx, vy = self.async_enemy_velocities.get(i, (0.0, 0.0))
+                    dx = vx * dt
+                    dy = vy * dt
+                    extrapolated_enemies.append([
+                        box[0] + dx, box[1] + dy,
+                        box[2] + dx, box[3] + dy
+                    ])
+                data['enemy'] = extrapolated_enemies
+
+            return data
+
     def main(self, frame, brawler, main):
         current_time = time.time()
         state = main.get_latest_state()
-        data = self.get_main_data(frame)
-        if self.static_map_enabled and self.static_map_manager and self.static_map_manager.enabled:
-            # Génération directe instantanée depuis la matrice discrète
-            player_list = data.get("player") if data else None
-            player_pos = self.get_entity_pos(player_list[0]) if player_list else (brawl_stars_width / 2.0, brawl_stars_height / 2.0)
-            walls, bushes = self.static_map_manager.get_visible_obstacles(player_pos, brawl_stars_width, brawl_stars_height)
-            if not hasattr(self, "_logged_static_map") or current_time - self._logged_static_map > 10.0:
-                print(f"[PylaAI] Mode Blueprint Carte Statique ACTIF : {len(walls)} murs, {len(bushes)} buissons visibles générés (0ms ONNX)")
-                self._logged_static_map = current_time
-            self.last_walls_data = walls
-            data['wall'] = walls
-            self.last_bushes_data = bushes
-            data['bush'] = bushes
-        elif current_time - self.time_since_walls_checked > self.walls_treshold:
-            tile_data = self.get_tile_data(frame, data.get("player"))
-            walls, bushes = self.process_tile_data(tile_data, current_time)
-            self.time_since_walls_checked = current_time
-            self.last_walls_data = walls
-            data['wall'] = walls
-            self.last_bushes_data = bushes
-            data['bush'] = bushes
-        else:
-            data['wall'] = self.last_walls_data
-            data['bush'] = self.last_bushes_data
 
+        if not self.async_worker_running:
+            self.start_async_worker()
+
+        # Récupération non bloquante (<0.02ms) de la dernière détection avec extrapolation
+        data = self.get_latest_async_data(current_time)
         data = self.validate_game_data(data)
         self.track_no_detections(data)
         if data:

@@ -162,6 +162,7 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
         def stop_gracefully(self):
             cprint("Stop requested from UI - shutting down gracefully", "#AAE5A4")
             self.stop_state_checker()
+            self.Play.close()
             self.window_controller.release_movement()
             self.window_controller.close()
             discord_bot.set_window_controller(None)

@@ -156,12 +156,11 @@ class Detect:
     def __init__(self, model_path, ignore_classes=None, classes=None, input_size=(640, 640)):
         threads_to_use = load_toml_as_dict("cfg/general_config.toml")['used_threads']
 
-        def get_optimal_threads(max_limit=4):
-            # Sur architectures hybrides Intel (4 P-cores + 4 E-cores), borner aux 4 P-cores
-            # supprime la désynchronisation et divise par 2 le temps d'inférence (79ms vs 130ms)
-            threads = os.cpu_count() or 4
-            threads_amount = min(4, max_limit) if threads >= 4 else max(2, threads)
-            print(f"Detected {threads} CPU threads, calibrated to {threads_amount} P-core threads for optimal latency.")
+        def get_optimal_threads(max_limit=2):
+            # Calibrage strict sur 2 P-Cores dédiés (CPU 0 et 1)
+            threads = os.cpu_count() or 2
+            threads_amount = min(2, max_limit)
+            print(f"Detected {threads} CPU threads, calibrated to {threads_amount} dedicated P-core threads.")
             return threads_amount
 
         self.optimal_threads_amount = get_optimal_threads() if threads_to_use == "auto" else int(threads_to_use)
